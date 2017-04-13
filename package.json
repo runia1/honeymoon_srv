@@ -1,0 +1,22 @@
+{
+  "name": "honeymoon_app",
+  "version": "0.0.1",
+  "scripts": {
+    "start": "nodemon server.js --exec babel-node",
+    "build": "babel server.js -d build",
+    "serve": "node build/server.js"
+  },
+  "dependencies": {
+    "braintree": "^2.0.2",
+    "express": "^4.15.0",
+    "mongodb": "^2.2.25",
+    "uws": "^0.14.0"
+  },
+  "devDependencies": {
+    "babel-cli": "^6.24.0",
+    "babel-polyfill": "^6.23.0",
+    "babel-preset-es2015": "^6.24.0",
+    "babel-preset-stage-2": "^6.22.0",
+    "nodemon": "^1.11.0"
+  }
+}

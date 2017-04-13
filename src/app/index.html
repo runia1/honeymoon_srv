@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Architecture Test</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+        }
+
+        #container {
+            padding-bottom: 30px;
+        }
+
+        #chatThread {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+        }
+
+        #messageInput {
+            display: inline;
+            width: 100%;
+            position: fixed;
+            bottom: 0;
+        }
+    </style>
+</head>
+<body>
+<div>
+    <button id="createEvent">Create Event</button>
+</div>
+
+
+<div id="container">
+    <ul id="chatThread"></ul>
+    <form id="messageInput">
+        <input id="message" />
+        <button type="submit" id="sendButton">Send</button>
+    </form>
+</div>
+
+<script>
+    var ws = new WebSocket('ws://localhost:8080');
+    
+    ws.addEventListener('open', function() {
+        var action = {
+            type: "CONNECTION_OPEN"
+        };
+        
+        socketMiddleware(ws, action);
+    });
+
+    ws.addEventListener('close', function() {
+        var action = {
+            type: "CONNECTION_OFFLINE"
+        };
+
+        socketMiddleware(ws, action);
+    });
+    
+    ws.addEventListener('error', function(e) {
+        var action = {
+            type: "CONNECTION_ERROR",
+            message: e
+        };
+        
+        socketMiddleware(ws, action);
+    });
+
+    ws.addEventListener('message', function(message) {
+        var action = JSON.parse(message.data);
+
+        socketMiddleware(ws, action);
+    });
+    
+    function socketMiddleware(ws, action) {
+        // do something with this action
+        switch(action.type) {
+            case 'CONNECTION_OPEN':
+                ws.send(JSON.stringify(action));
+                break;
+            case 'CONNECTION_OPENED':
+                // display that a user opened a connection.
+                document.querySelector('#chatThread').innerHTML += "<li>User: "+action.state.userId+" connected!</li>";
+                break;
+            case 'CONNECTION_CLOSED':
+                // display someone left site.
+                document.querySelector('#chatThread').innerHTML += "<li>User: "+action.userId+" left!</li>";
+                break;
+            case 'CONNECTION_OFFLINE':
+                // display that you're offline.
+                document.querySelector('#chatThread').innerHTML += "<li>NO connection at the moment :(</li>";
+                break;
+            case 'CONNECTION_ERROR':
+                // display an error occurred.
+                document.querySelector('#chatThread').innerHTML += "<li>An error occured: "+action.message+"</li>";
+                break;
+            case 'SEND_MESSAGE':
+                ws.send(JSON.stringify(action));
+                document.querySelector('#message').value = '';
+                break;
+            case 'SENT_MESSAGE':
+                // display someone sent a message.
+                document.querySelector('#chatThread').innerHTML += "<li>User: "+action.userId+" says: "+action.message+"</li>";
+                break;
+            case 'EVENT_CREATE':
+                ws.send(JSON.stringify(action));
+                break;
+        }
+    }
+
+    document.querySelector('#messageInput').onsubmit = function(ev) {
+        ev.preventDefault();
+        
+        var action = {
+            type: "SEND_MESSAGE",
+            message: document.querySelector('#message').value
+        };
+        
+        socketMiddleware(ws, action);
+    };
+    
+    document.querySelector('#createEvent').onclick = function(ev) {
+        ev.preventDefault();
+        
+        var action = {
+            type: "EVENT_CREATE",
+            data: {
+                date: "2017-05-12",
+                time: "6:30pm",
+                description: "Party at Max's house!",
+                title: "Party at Max's!",
+                groups: [1]
+            }
+        };
+        
+        socketMiddleware(ws, action);
+    };
+
+</script>
+</body>
+</html>
