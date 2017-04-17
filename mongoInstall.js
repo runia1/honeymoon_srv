@@ -22,14 +22,13 @@ db.createCollection("gifts")
 
 // users
 const users = {
-    ip: '',
     ctime: '',
     nickname: ''
 };
 
 // gifts
 const gifts = {
-    userId: '',
+    userId: ObjectId("58f12e493c688212a130c73b"),
     amount: '',
     comment: '',
     registryId: ''

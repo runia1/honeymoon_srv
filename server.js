@@ -43,14 +43,25 @@ const getConnection = () => {
     });
 };
 
+
 // APPLICATION SERVER
 let currentConnections = {};
 let currentPushSubscriptions = {};
 
-const wss = new WebSocketServer({ port: 8081});
+const wss = new WebSocketServer({ 
+    port: 8081
+}, () => {
+   console.log("Websocket Server started on port: 8081"); 
+});
 wss.on('connection', ws => {
+    // get some data about this connection
+    ws.data = {};
+    ws.data.userAgent = ws.upgradeReq.headers['user-agent'];
+    ws.data.ip = ws.upgradeReq.headers['x-real-ip'];
+    ws.data.ctime = new Date();
+    ws.data.nickname = 'anonymous';
+
     // Set up some handlers for socket events
-    
     ws.on('message', message => {
         try {
             let action = JSON.parse(message);
@@ -94,26 +105,45 @@ const dataLayer = (ws, action) => {
                 // lets get a db connection
                 return getConnection();
             }).then((db) => {
-                // lets build them an initial state...
-                
                 // insert a new annonymous user
-                let user = db.collection('users').insertOne({
-                    //TODO: ip, ctime, etc,. ?
-                });
-                let registry = db.collection('registry').find({}).toArray();
-                let gifts = db.collection('gifts').find({}).toArray();
+                return db.collection('users').insertOne(ws.data).then((result) => {
+                    // lets build them an initial state...
+                    let user = db.collection('users').findOne({ _id: ObjectId(result.insertedId) });
+                    let registry = db.collection('registry').aggregate([{
+                        $lookup: {
+                            from: "gifts",
+                            localField: "_id",
+                            foreignField: "registryId",
+                            as: "comments"
+                        }
+                    },
+                    {
+                        $project: {
+                            "comments._id": 0,
+                            "comments.amount": 0,
+                            "comments.registryId": 0
+                        }
+                    }]).toArray();
 
-                return Promise.all([user, registry, gifts]);
+                    return Promise.all([user, registry]);
+                });
             }).then((values) => {
                 ws.data.user = values[0];
                 ws.data.registry = values[1];
-                // TODO: remove the amount from gifts so other users can't see how much others gave...
-                ws.data.gifts = values[2];
-
+                
+                // unset the values on the data object bc they are now in the data.user object.
+                delete ws.data.clientToken;
+                delete ws.data.ctime;
+                delete ws.data.ip;
+                delete ws.data.userAgent;
+                delete ws.data._id;
+                delete ws.data.nickname;
+                
                 action = {
                     type: "CONNECTION_OPENED",
                     state: ws.data
                 };
+                
                 // Store handle to this connection for later
                 currentConnections[ws.data.user._id] = ws;
                 notificationLayer(ws, action);
@@ -196,34 +226,38 @@ const dataLayer = (ws, action) => {
                         totalGiven: action.data.amount
                     }
                 });
-
-                // run these first...
-                return Promise.all([res0, res1, res2]);
-            }).then((results) => {
-                // TODO: validate results from first two queries
-
-                // now get updated list of registry items to send back
-                //return db.collection('registry').find({}).toArray();
-                return db.collection('registry').aggregate([{
-                    $lookup: {
-                        from: "gifts",
-                        localField: "_id",
-                        foreignField: "registryId",
-                        as: "comments"
-                    }
-                },
-                {
-                    $project: {
-                        "comments._id": 0,
-                        "comments.amount": 0,
-                        "comments.registryId": 0
-                    }
-                }]).toArray();
                 
-            }).then((updatedRegistry) => {
+                return Promise.all([res0, res1, res2]).then((result) => {
+                    // TODO: validate results from first two queries
+                    
+                    let registry = db.collection('registry').aggregate([{
+                        $lookup: {
+                            from: "gifts",
+                            localField: "_id",
+                            foreignField: "registryId",
+                            as: "comments"
+                        }
+                    },
+                    {
+                        $project: {
+                            "comments._id": 0,
+                            "comments.amount": 0,
+                            "comments.registryId": 0
+                        }
+                    }]).toArray();
+                    
+                    let user = db.collection('users').findOne({ _id: ObjectId(ws.data.user_id) });
+                    
+                    return Promise.all([registry, user]);
+                });
+                
+            }).then((results) => {
                 action = {
                     type: "GIFT_CREATED",
-                    data: updatedRegistry
+                    data: {
+                        registry: results[0],
+                        user: results[1]
+                    }
                 };
                 notificationLayer(ws, action);
 
@@ -235,87 +269,6 @@ const dataLayer = (ws, action) => {
                 notificationLayer(ws, action);
             });
             break;
-            
-        /*
-        case 'USER_UPDATE':
-            runQuery((db) => {
-                //TODO: validate that action.data has all needed data.
-                
-                // NOTE: we do not allow them to update their password through this action
-                let user = {
-                    email: action.data.email,
-                    fname: action.data.fname,
-                    lname: action.data.lname
-                };
-
-                try {
-                    const result = db.collection('users').updateOne(
-                        { _id: action.data._id },
-                        { $set: user }
-                    );
-
-                    if (!result.modifiedCount) {
-                        throw new Error("Could not find user in DB.");
-                    }
-                    else {
-                        user._id = action.data._id;
-
-                        action = {
-                            type: "USER_UPDATED",
-                            data: user
-                        };
-                    }
-                }
-                catch(e) {
-                    action = {
-                        type: "USER_UPDATE_ERROR",
-                        message: e
-                    };
-                }
-            });
-            break;
-            
-        case 'USER_DELETE':
-            runQuery((db) => {
-                try {
-                    const user = db.collection('users').findOne({ _id: action.data._id});
-
-                    // pull user id out of "users" and "admins" for these events.
-                    db.collection('events').updateMany(
-                        { _id: { $in: user.events } },
-                        { $pull: { users: action.data._id, admins: action.data._id } }
-                    );
-
-                    // pull user id out of "users" and "admins" for these groups.
-                    db.collection('groups').updateMany(
-                        { _id: { $in: user.groups } },
-                        { $pull: { users: action.data._id, admins: action.data._id } }
-                    );
-                    
-                    // delete user
-                    const result = db.collection('users').deleteOne(
-                        { _id: action.data._id }
-                    );
-
-                    if (!result.deletedCount) {
-                        throw new Error("Could not find user in DB.");
-                    }
-                    else {
-                        action = {
-                            type: "USER_DELETED",
-                            userId: action.data._id
-                        };
-                    }
-                }
-                catch(e) {
-                    action = {
-                        type: "USER_DELETE_ERROR",
-                        message: e
-                    };
-                }
-            });
-            break;
-        */
     }
 };
 
@@ -334,6 +287,11 @@ const notificationLayer = (ws, action) => {
             userIds = 'connected';
             notificationSender(userIds, action);
             break;
+            
+        case 'CONNECTION_OPEN_ERROR':
+            userIds = [ws.data.user._id];
+            notificationSender(userIds, action);
+            break;
         
         case 'CONNECTION_CLOSED':
             // the user just closed the connection.
@@ -347,17 +305,8 @@ const notificationLayer = (ws, action) => {
             break;
             
         case 'GIFT_CREATE_ERROR':
-            userIds = ws.data.user._id;
+            userIds = [ws.data.user._id];
             notificationSender(userIds, action);
-        /*
-        case 'USER_UPDATED':
-
-            break;
-
-        case 'USER_DELETED':
-
-            break;
-        */
     }
 };
 
