@@ -153,7 +153,7 @@ const dataLayer = (ws, action) => {
                 
                 action = {
                     type: "CONNECTION_OPEN_ERROR",
-                    message: error
+                    message: error.message
                 };
                 notificationLayer(ws, action);
             });
@@ -169,7 +169,46 @@ const dataLayer = (ws, action) => {
             break;
         
         case 'GIFT_CREATE':
-            //TODO: validate that action.data has all needed data.
+            //TODO: move validation to it's own layer before dataLayer
+            const requiredArgs = {
+                amount: 'number',
+                paymentMethodNonce: 'string',
+                nickname: 'string',
+                comment: 'string',
+                registryId: 'string'
+            };
+
+            for (let [arg, type] of it(requiredArgs)) {
+                if (!action.data.hasOwnProperty(arg)) {
+                    action = {
+                        type: "GIFT_CREATE_ERROR",
+                        message: "Missing argument: "+arg
+                    };
+                    notificationLayer(ws, action);
+                    return;
+                }
+                
+                if (typeof action.data[arg] !== type) {
+                    //try to convert to that type
+                    try {
+                        switch (type) {
+                            case 'number':
+                                action.data[arg] = Number(action.data[arg]);
+                                break;
+                            case 'string':
+                                action.data[arg] = String(action.data[arg]);
+                        }
+                    }
+                    catch (error) {
+                        action = {
+                            type: "GIFT_CREATE_ERROR",
+                            message: error.message
+                        };
+                        notificationLayer(ws, action);
+                        return;
+                    }
+                }
+            }
             
             // attempt to make trxn with gateway
             return new Promise((resolve, reject) => {
@@ -195,8 +234,6 @@ const dataLayer = (ws, action) => {
                 
                 return getConnection();
             }).then((db) => {
-                // update DB, return result.
-                
                 // update user's nickname with gift's nickname data
                 let res0 = db.collection('users').updateOne({
                     _id: ObjectId(ws.data.user._id)
@@ -209,27 +246,37 @@ const dataLayer = (ws, action) => {
 
                 // insert new gift
                 const gift = {
-                    userId: ws.data.user._id,
+                    userId: ObjectId(ws.data.user._id),
                     amount: action.data.amount,
                     comment: action.data.comment,
-                    registryId: action.data.registryId,
+                    registryId: ObjectId(action.data.registryId),
                     transaction: action.data.transaction
                 };
                 let res1 = db.collection('gifts').insertOne(gift);
-
-                // update registry item totalGiven that this is gifted towards
-                let res2 = db.collection('registry').updateOne({
-                    _id: ObjectId(action.data.registryId)
-                },
-                {
-                    $inc: {
-                        totalGiven: action.data.amount
-                    }
-                });
                 
-                return Promise.all([res0, res1, res2]).then((result) => {
-                    // TODO: validate results from first two queries
+                // Get the registry item
+                let res2 = db.collection('registry').findOne({ _id: ObjectId(action.data.registryId) });
+                
+                return Promise.all([res0, res1, res2]).then((results) => {
                     
+                    const newTotalGiven = results[2].totalGiven + action.data.amount;
+                    let newGoalReached = false;
+                    
+                    if(newTotalGiven >= results[2].totalPrice) {
+                        newGoalReached = true;
+                    }
+                    
+                    // update registry item that this is gifted towards
+                    return db.collection('registry').updateOne({
+                        _id: ObjectId(action.data.registryId)
+                    },
+                    {
+                        $set: {
+                            totalGiven: newTotalGiven,
+                            goalReached: newGoalReached
+                        }
+                    });
+                }).then((result3) => {
                     let registry = db.collection('registry').aggregate([{
                         $lookup: {
                             from: "gifts",
@@ -238,19 +285,19 @@ const dataLayer = (ws, action) => {
                             as: "comments"
                         }
                     },
-                    {
-                        $project: {
-                            "comments._id": 0,
-                            "comments.amount": 0,
-                            "comments.registryId": 0
-                        }
-                    }]).toArray();
-                    
-                    let user = db.collection('users').findOne({ _id: ObjectId(ws.data.user_id) });
-                    
+                        {
+                            $project: {
+                                "comments._id": 0,
+                                "comments.amount": 0,
+                                "comments.registryId": 0,
+                                "comments.transaction": 0
+                            }
+                        }]).toArray();
+
+                    let user = db.collection('users').findOne({ _id: ObjectId(ws.data.user._id) });
+
                     return Promise.all([registry, user]);
                 });
-                
             }).then((results) => {
                 action = {
                     type: "GIFT_CREATED",
@@ -264,7 +311,7 @@ const dataLayer = (ws, action) => {
             }).catch((error) => {
                 action = {
                     type: "GIFT_CREATE_ERROR",
-                    message: error
+                    message: error.message
                 };
                 notificationLayer(ws, action);
             });
@@ -337,7 +384,7 @@ const notificationSender = (userIds, action) => {
             // first check for this user in currentConnections to see if we can notify them via a websocket.
             if (currentConnections.hasOwnProperty(uid)) {
                 console.log('Found uid: '+uid+' in current connections');
-                currentConnections[uid].send(JSON.stringify(notification));
+                currentConnections[uid].send(JSON.stringify(action));
             }
 
             // if they aren't in there lets see if they are a Push subscriber, maybe we can contact them that way.
