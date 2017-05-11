@@ -7,7 +7,8 @@
 import "babel-polyfill";
 import { Server as WebSocketServer } from 'uws';
 import { MongoClient, ObjectId } from 'mongodb';
-import braintree from 'braintree';
+import request from 'request-promise-native';
+import uuid from 'uuid';
 
 // GENERATOR makes objects easy to loop over in key value fashion.
 function* it(obj) {
@@ -17,13 +18,24 @@ function* it(obj) {
 }
 
 
-// BRAINTREE SERVER IMPLEMENTATION
-const braintreeCredentials = require('../keys/braintree.json');
-const gateway = braintree.connect({
-    environment: braintree.Environment.Sandbox,
-    merchantId: braintreeCredentials.merchantId,
-    publicKey: braintreeCredentials.publicKey,
-    privateKey: braintreeCredentials.privateKey
+// SET UP SQUARE
+console.log("Setting up Square payment.");
+const squareCredentials = require('../keys/square_prod.json');
+let paymentLocationId;
+request({
+    uri: "https://connect.squareup.com/v2/locations",
+    headers: {
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${squareCredentials.accessToken}`
+    },
+    json: true
+}).then((result) => {
+    result.locations.forEach((location) => {
+        console.log(`Found payment location: ${location.name} with id: ${location.id}`);
+        paymentLocationId = location.id;
+    });
+}).catch((error) => {
+    console.error(error);
 });
 
 
@@ -90,26 +102,12 @@ wss.on('connection', ws => {
 const dataLayer = (ws, action) => {
     switch(action.type) {
         case 'CONNECTION_OPEN':
-            
-            return new Promise((resolve, reject) => {
-                gateway.clientToken.generate({}, (err, response) => {
-                    if (err) {
-                        reject(err);
-                    }
-                    
-                    resolve(response);
-                });  
-            }).then((response) => {
-                ws.data.clientToken = response.clientToken;
-                
-                // lets get a db connection
-                return getConnection();
-            }).then((db) => {
+            // lets get a db connection
+            getConnection().then((db) => {
                 // insert a new annonymous user
                 return db.collection('users').insertOne(ws.data).then((result) => {
                     // lets build them an initial state...
-                    let user = db.collection('users').findOne({ _id: ObjectId(result.insertedId) });
-                    let registry = db.collection('registry').aggregate([{
+                    return db.collection('registry').aggregate([{
                         $lookup: {
                             from: "gifts",
                             localField: "_id",
@@ -124,20 +122,14 @@ const dataLayer = (ws, action) => {
                             "comments.registryId": 0
                         }
                     }]).toArray();
-
-                    return Promise.all([user, registry]);
                 });
-            }).then((values) => {
-                ws.data.user = values[0];
-                ws.data.registry = values[1];
-                
-                // unset the values on the data object bc they are now in the data.user object.
-                delete ws.data.clientToken;
-                delete ws.data.ctime;
-                delete ws.data.ip;
-                delete ws.data.userAgent;
-                delete ws.data._id;
-                delete ws.data.nickname;
+            }).then((registry) => {
+                const user = ws.data;
+                // reset ws.data
+                ws.data = {};
+                ws.data.user = user;
+                ws.data.user.squareAppId = squareCredentials.applicationId;
+                ws.data.registry = registry;
                 
                 action = {
                     type: "CONNECTION_OPENED",
@@ -210,25 +202,24 @@ const dataLayer = (ws, action) => {
                 }
             }
             
-            // attempt to make trxn with gateway
-            return new Promise((resolve, reject) => {
-                gateway.transaction.sale({
-                    amount: action.data.amount,
-                    paymentMethodNonce: action.data.paymentMethodNonce,
-                    options: {
-                        submitForSettlement: true
-                    }
-                }, (err, result) => {
-                    if (err) {
-                        reject(err);
-                    }
-                    else if (!result.success) {
-                        reject(result.errors.deepErrors());
-                    }
-                    else {
-                        resolve(result);
-                    }
-                });
+            // attempt to make charge with square
+            request({
+                method: 'POST',
+                uri: `https://connect.squareup.com/v2/locations/${paymentLocationId}/transactions`,
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${squareCredentials.accessToken}`,
+                },
+                body: {
+                    'card_nonce': action.data.paymentMethodNonce,
+                    'amount_money': {
+                        'amount': action.data.amount * 100,
+                        'currency': 'USD'
+                    },
+                    'idempotency_key': uuid.v4()
+                },
+                json: true
             }).then((result) => {
                 action.data.transaction = result.transaction;
                 
@@ -243,6 +234,9 @@ const dataLayer = (ws, action) => {
                         nickname: action.data.nickname
                     }
                 });
+                
+                // update ws user data
+                ws.data.user.nickname = action.data.nickname;
 
                 // insert new gift
                 const gift = {
@@ -277,7 +271,7 @@ const dataLayer = (ws, action) => {
                         }
                     });
                 }).then((result3) => {
-                    let registry = db.collection('registry').aggregate([{
+                    return db.collection('registry').aggregate([{
                         $lookup: {
                             from: "gifts",
                             localField: "_id",
@@ -285,25 +279,21 @@ const dataLayer = (ws, action) => {
                             as: "comments"
                         }
                     },
-                        {
-                            $project: {
-                                "comments._id": 0,
-                                "comments.amount": 0,
-                                "comments.registryId": 0,
-                                "comments.transaction": 0
-                            }
-                        }]).toArray();
-
-                    let user = db.collection('users').findOne({ _id: ObjectId(ws.data.user._id) });
-
-                    return Promise.all([registry, user]);
+                    {
+                        $project: {
+                            "comments._id": 0,
+                            "comments.amount": 0,
+                            "comments.registryId": 0,
+                            "comments.transaction": 0
+                        }
+                    }]).toArray();
                 });
-            }).then((results) => {
+            }).then((registry) => {
                 action = {
                     type: "GIFT_CREATED",
                     data: {
-                        registry: results[0],
-                        user: results[1]
+                        registry: registry,
+                        user: ws.data.user
                     }
                 };
                 notificationLayer(ws, action);
@@ -330,8 +320,8 @@ const notificationLayer = (ws, action) => {
     
     switch(action.type) {
         case 'CONNECTION_OPENED':
-            // the user just opened the app, lets tell the other users he's online.
-            userIds = 'connected';
+            // the user just opened the app, lets send down his initial state.
+            userIds = [ws.data.user._id];
             notificationSender(userIds, action);
             break;
             
@@ -347,8 +337,18 @@ const notificationLayer = (ws, action) => {
             break;
             
         case 'GIFT_CREATED':
-            userIds = 'connected';
+            // tell the user that his gift was created
+            userIds = [ws.data.user._id];
             notificationSender(userIds, action);
+
+            // tell everyone connected that the registry was updated
+            userIds = 'connected';
+            notificationSender(userIds, {
+                type: "PEER_GIFT_CREATED",
+                data: {
+                    registry: action.data.registry
+                }
+            });
             break;
             
         case 'GIFT_CREATE_ERROR':
