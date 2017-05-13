@@ -158,6 +158,7 @@ const dataLayer = (ws, action) => {
                 type: "CONNECTION_CLOSED",
                 userId: ws.data.user._id
             };
+            notificationLayer(ws, action);
             break;
         
         case 'GIFT_CREATE':
