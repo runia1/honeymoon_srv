@@ -9,6 +9,7 @@ import { Server as WebSocketServer } from 'uws';
 import { MongoClient, ObjectId } from 'mongodb';
 import request from 'request-promise-native';
 import uuid from 'uuid';
+import nodemailer from 'nodemailer';
 
 // GENERATOR makes objects easy to loop over in key value fashion.
 function* it(obj) {
@@ -16,6 +17,17 @@ function* it(obj) {
         yield [key, obj[key]];
     }
 }
+
+
+// SET UP NODEMAILER
+const gmailCredentials = require('../keys/gmail.json');
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: gmailCredentials.email,
+    pass: gmailCredentials.pass
+  }
+});
 
 
 // SET UP SQUARE
@@ -403,4 +415,37 @@ const notificationSender = (userIds, action) => {
     }
     
     console.log(''); //create an extra line seperation in logs
+};
+
+
+process.on('uncaughtException', (exception) => {
+  logError(exception);
+});
+
+process.on('unhandledRejection', (reason, p) => {
+  const msg = `Unhandled Rejection at Promise: ${p}, reason: ${reason}`;
+  logError(msg);
+});
+
+const logError = (msg) => {
+  msg = `${new Date()} => ERROR: ${msg}`;
+
+  //log it to stderr
+  console.error(msg);
+
+  //email it to mrunia
+  const mailOptions = {
+    from: gmailCredentials.email,
+    to: gmailCredentials.email,
+    subject: 'Server error [http]',
+    text: `An error occurred and your server may be down!\nError: ${msg}`
+  };
+
+  transporter.sendMail(mailOptions, (error, info) => {
+    if (error) {
+      console.error(error);
+    } else {
+      console.log('Error Email sent: ' + info.response);
+    }
+  });
 };

@@ -10,6 +10,7 @@
     "braintree": "^2.0.2",
     "express": "^4.15.0",
     "mongodb": "^2.2.25",
+    "nodemailer": "^4.0.1",
     "request": "^2.81.0",
     "request-promise-native": "^1.0.4",
     "uuid": "^3.0.1",
